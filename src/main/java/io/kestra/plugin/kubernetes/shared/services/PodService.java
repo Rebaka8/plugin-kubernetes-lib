@@ -163,6 +163,14 @@ public final class PodService {
                 .anyMatch(c -> c.getState() != null && c.getState().getRunning() != null);
     }
 
+    /**
+     * Wraps a pod predicate to accept {@code null} as terminal/deleted, ensuring that a DELETED watch
+     * event ends Fabric8's wait immediately instead of waiting out the chunk timeout.
+     */
+    private static Predicate<Pod> terminateOnDeleted(Predicate<Pod> condition) {
+        return pod -> pod == null || condition.test(pod);
+    }
+
     public static Pod waitForContainersStartedOrCompleted(KubernetesClient client, Logger logger, Pod pod, Duration waitUntilRunning) {
         var podResource = PodService.podRef(client, pod);
 
@@ -182,20 +190,28 @@ public final class PodService {
             var waitTime = remaining.compareTo(chunk) < 0 ? remaining : chunk;
             remaining = remaining.minus(waitTime);
 
+            var watchFailed = false;
+            Pod result = null;
             try {
-                var result = podResource.waitUntilCondition(
-                    PodService::isStartedOrCompleted,
+                result = podResource.waitUntilCondition(
+                    terminateOnDeleted(PodService::isStartedOrCompleted),
                     waitTime.toSeconds(),
                     TimeUnit.SECONDS
                 );
-                if (result != null) {
-                    return result;
-                }
             } catch (KubernetesClientTimeoutException e) {
                 // chunk expired — fall through to GET check
+                watchFailed = true;
             } catch (KubernetesClientException e) {
                 // watch error — fall through to GET check
                 logger.debug("Watch error while waiting for containers to start after {}s, rechecking pod state", waitTime.toSeconds(), e);
+                watchFailed = true;
+            }
+
+            if (!watchFailed) {
+                if (result == null) {
+                    throw new KubernetesClientException("Pod was deleted while waiting for containers to start: " + pod.getMetadata().getName());
+                }
+                return result;
             }
 
             podResource = podRef(client, pod);
@@ -217,8 +233,7 @@ public final class PodService {
             logger,
             pod,
             waitRunning,
-            j -> j != null &&
-                j.getStatus() != null &&
+            j -> j.getStatus() != null &&
                 j.getStatus().getContainerStatuses() != null &&
                 j.getStatus()
                     .getContainerStatuses()
@@ -239,8 +254,7 @@ public final class PodService {
             logger,
             pod,
             waitRunning,
-            j -> j != null &&
-                j.getStatus() != null &&
+            j -> j.getStatus() != null &&
                 COMPLETED_PHASES.contains(j.getStatus().getPhase())
         );
     }
@@ -254,16 +268,26 @@ public final class PodService {
             var waitTime = remaining.compareTo(chunk) < 0 ? remaining : chunk;
             remaining = remaining.minus(waitTime);
 
+            var watchFailed = false;
+            Pod ended = null;
             try {
-                var ended = podResource.waitUntilCondition(condition, waitTime.toSeconds(), TimeUnit.SECONDS);
-                if (ended != null) {
-                    return ended;
-                }
+                ended = podResource.waitUntilCondition(terminateOnDeleted(condition), waitTime.toSeconds(), TimeUnit.SECONDS);
             } catch (KubernetesClientTimeoutException e) {
                 // chunk expired — fall through to GET check below
+                watchFailed = true;
             } catch (KubernetesClientException e) {
                 // watch error — fall through to GET check below
                 logger.debug("Watch error while waiting for pod completion, checking pod state", e);
+                watchFailed = true;
+            }
+
+            if (!watchFailed) {
+                if (ended == null) {
+                    var podName = pod.getMetadata().getName();
+                    logger.warn("Pod '{}' was deleted before reaching a terminal phase", podName);
+                    throw new KubernetesClientException("Pod was deleted before reaching a terminal phase: " + podName);
+                }
+                return ended;
             }
 
             podResource = podRef(client, pod);
@@ -498,6 +522,13 @@ public final class PodService {
         return withRetries(logger, where, call, DEFAULT_RETRY_MAX_DURATION);
     }
 
+    private static boolean is404(Throwable throwable) {
+        if (throwable instanceof KubernetesClientException kce && kce.getCode() == 404) {
+            return true;
+        }
+        return throwable != null && throwable.getCause() instanceof KubernetesClientException kce && kce.getCode() == 404;
+    }
+
     /**
      * Retry file operations with exponential backoff, capped at {@code maxDuration}. Use a shorter
      * budget on best-effort paths (e.g. output-file download from an already-failed pod) so a call
@@ -525,12 +556,16 @@ public final class PodService {
                     ? ioException
                     : new IOException("Failed to call '" + where + "'", retryFailed.getCause()))
                 .build()
-                // Stay on the result-predicate overload (rather than run(IOException.class, ...), which would
-                // narrow Failsafe's default "retry on any exception" to IOException only): fabric8 calls can
+                // The (result, throwable) overload retries any exception and a false result (fabric8 calls can
                 // throw KubernetesClientException and other non-IOException runtime errors that must still be
-                // retried the same way a bare `false` result is.
+                // retried), except a 404 KubernetesClientException (pod gone), which fails on the first attempt.
                 .run(
-                    object -> !object,
+                    (result, throwable) -> {
+                        if (is404(throwable)) {
+                            return false;
+                        }
+                        return throwable != null || (result != null && !result);
+                    },
                     () ->
                     {
                         var currentAttempt = attempt.incrementAndGet();
@@ -946,7 +981,7 @@ public final class PodService {
             if (Thread.currentThread().isInterrupted()) {
                 throw new IOException("Upload verification for " + label + " was interrupted", e);
             }
-            logger.info("Bulk upload failed for {}, falling back to a slower upload. Reason: {}", label, e.getMessage(), e);
+            logger.warn("Bulk upload failed for {}, falling back to a slower upload. Reason: {}", label, e.getMessage(), e);
             // withRetries/countLocalFiles/withVerificationRetries above only ever throw IOException, but
             // the catch is intentionally broader (Exception) to also net any unchecked failure — wrap
             // that case rather than assume the cast always holds.
