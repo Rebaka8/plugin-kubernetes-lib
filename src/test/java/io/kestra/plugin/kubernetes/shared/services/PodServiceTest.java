@@ -1399,7 +1399,7 @@ class PodServiceTest {
                 () -> PodService.waitForPodReady(client, pendingPod, Duration.ofMinutes(10))
             );
 
-            assertThat(exception.getMessage(), is("Pod was deleted while waiting for pod to be ready: pod-ready-deleted"));
+            assertThat(exception.getMessage(), is("Pod 'pod-ready-deleted' no longer exists while waiting for it to be ready; it was deleted or evicted outside this task, check the namespace events"));
         }
     }
 
@@ -1472,7 +1472,7 @@ class PodServiceTest {
                 () -> PodService.waitForInitContainerRunning(client, pendingPod, "init-files", Duration.ofMinutes(10))
             );
 
-            assertThat(exception.getMessage(), is("Pod was deleted while waiting for init container to start: pod-init-deleted"));
+            assertThat(exception.getMessage(), is("Pod 'pod-init-deleted' no longer exists while waiting for init container to start; it was deleted or evicted outside this task, check the namespace events"));
         }
     }
 

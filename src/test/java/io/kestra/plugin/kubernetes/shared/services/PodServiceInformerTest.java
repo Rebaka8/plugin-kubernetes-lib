@@ -124,7 +124,7 @@ class PodServiceInformerTest {
             );
             long elapsed = System.currentTimeMillis() - start;
 
-            assertThat(exception.getMessage(), is("Pod was deleted while waiting for pod to be ready: pending-pod-ready-deleted"));
+            assertThat(exception.getMessage(), is("Pod 'pending-pod-ready-deleted' no longer exists while waiting for it to be ready; it was deleted or evicted outside this task, check the namespace events"));
             assertTrue(elapsed < 10_000, "Expected wait to short-circuit in under 10s on deletion, but took " + elapsed + "ms");
         } finally {
             executor.shutdownNow();
@@ -166,7 +166,7 @@ class PodServiceInformerTest {
             );
             long elapsed = System.currentTimeMillis() - start;
 
-            assertThat(exception.getMessage(), is("Pod was deleted while waiting for init container to start: pending-pod-init-deleted"));
+            assertThat(exception.getMessage(), is("Pod 'pending-pod-init-deleted' no longer exists while waiting for init container to start; it was deleted or evicted outside this task, check the namespace events"));
             assertTrue(elapsed < 10_000, "Expected wait to short-circuit in under 10s on deletion, but took " + elapsed + "ms");
         } finally {
             executor.shutdownNow();
